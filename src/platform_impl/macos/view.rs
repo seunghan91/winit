@@ -581,6 +581,7 @@ declare_class!(
         #[method(mouseDown:)]
         fn mouse_down(&self, event: &NSEvent) {
             trace_scope!("mouseDown:");
+            self.finish_ime_composition();
             self.mouse_motion(event);
             self.mouse_click(event, ElementState::Pressed);
         }
@@ -595,6 +596,7 @@ declare_class!(
         #[method(rightMouseDown:)]
         fn right_mouse_down(&self, event: &NSEvent) {
             trace_scope!("rightMouseDown:");
+            self.finish_ime_composition();
             self.mouse_motion(event);
             self.mouse_click(event, ElementState::Pressed);
         }
@@ -609,6 +611,7 @@ declare_class!(
         #[method(otherMouseDown:)]
         fn other_mouse_down(&self, event: &NSEvent) {
             trace_scope!("otherMouseDown:");
+            self.finish_ime_composition();
             self.mouse_motion(event);
             self.mouse_click(event, ElementState::Pressed);
         }
@@ -886,12 +889,44 @@ impl WinitView {
             return;
         }
 
+        // End the composition session of the input method, otherwise it would resume it on the
+        // next key press once IME is enabled again. This is done before clearing the marked text,
+        // so an input method that commits its composition synchronously is still reported.
+        if unsafe { self.hasMarkedText() } {
+            if let Some(input_context) = self.inputContext() {
+                input_context.discardMarkedText();
+            }
+        }
+
         // Clear markedText
         *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
 
         if self.ivars().ime_state.get() != ImeState::Disabled {
             self.ivars().ime_state.set(ImeState::Disabled);
             self.queue_event(WindowEvent::Ime(Ime::Disabled));
+        }
+    }
+
+    /// Commit the marked text and end the composition session of the input method.
+    ///
+    /// This mirrors `NSTextView`, which accepts its marked text when clicked, so the text
+    /// being composed is not lost if the application moves the focus in response to a click.
+    fn finish_ime_composition(&self) {
+        if !self.is_ime_enabled() || !unsafe { self.hasMarkedText() } {
+            return;
+        }
+
+        let text = self.ivars().marked_text.borrow().string().to_string();
+        *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
+        self.ivars().ime_state.set(ImeState::Ground);
+
+        self.queue_event(WindowEvent::Ime(Ime::Preedit(String::new(), None)));
+        self.queue_event(WindowEvent::Ime(Ime::Commit(text)));
+
+        // The marked text was cleared above, so the input method cannot commit it again while
+        // discarding it.
+        if let Some(input_context) = self.inputContext() {
+            input_context.discardMarkedText();
         }
     }
 
